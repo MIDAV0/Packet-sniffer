@@ -1,0 +1,44 @@
+1. Efficient packet interception and navigation through packet headers.
+
+1.1 Efficient packet interception
+In order to intercept packets using the pcap library efficiently, we use pcap_loop(), which captures packets until the ending condition occurs. Dispatch function is a pcap handler callback which handles captured packets.
+
+1.2 Navigation through packet headers.
+First, when we capture the packet, we get a pointer to the ethernet header, which we can convert into ether_header struct for further processing. Then we need to check the next layer's protocol using ether_type in the ethernet header(IP or ARP). To move to the next layer's header, we add 14 bytes(total size of Ethernet header) to the pointer of the ethernet header. Now we can initialise the header structure for the next layer. In the IP header structure, we can check the protocol of the next layer using ip_p (we are looking for TCP protocol) and initialise the pointer to the following header by adding the length of the IP header to the current IP header pointer. We should multiply IHL by 4 (because the header length is stored in 4-byte words) and add it to the current IP header pointer. 
+
+2. Attacks
+To store the results of the analysis of packets, we created a packet_info structure. Structure stores bits representing the type of attack detected (ARP, SYN, google URL, facebook URL, ip address in long format). We allocate memory for this structure for every packet received. This will help with multithreading later on.
+
+2.1 SYN Flood
+To detect SYN flood attack we need to check the control bits in the TCP header. We need to check whether SYN bit equals 1 (incoming request). In order to avoid false positive requests we also need to check that ACK bit equals 0.
+If SYN attack is detected, we set the corresponding bit in the packet_info structure to 1 and add ip address.
+This attack was tested using hping3 tool provided. We first sent 100 SYN requests to the server to check that the program detected them correctly. Then we send 100 SYN ACK request to check that program does not count false positive cases.
+
+2.2 ARP poisoning
+To detect ARP poisoning, we check that the protocol is ARP. Then we get arp_header from the packet by adding 14 bytes to the ether header.
+In the ARP header, we are interested in the opcode. We are interested in ARP reply, which opcode is 2 (int 512) because attackers will send unsolicited ARP replies pretending to be someone else. If APR poisoning is detected, we set the corresponding bit in the packet_info structure to 1.
+This attack was tested using arp-poison.py script provided. First, we tested the code with the operation set to 2 in the script to check if the program detects ARP replies correctly. Then we tested it with the operation set to 1 to check if it does not count false positive cases. 
+
+2.3 Blacklisted URL detection
+To detect blacklisted URL we check that the protocol is TCP and that packet is sent to port 80(HTTP). To get the pointer to http header, we need to add 4 * data offset of tcp_header to tcp_header pointer.
+Then we check that HTTP header has POST/GET request in the header. Finally, we can check if the header contains a blacklisted URL, set the corresponding bit in the packet_info structure to 1 and output the message.
+The program was tested with different URLs, using wget, including blacklisted ones.
+
+3. Multithreading
+We used the threadpool model, where we create a fixed number of threads on startup and when a packet arrives, we add it to a work queue. The threads then try to take work from the queue. This approach deals better with heavy traffic scenarios as it limits the number of active threads, avoiding thrashing.
+We will create eight threads on the startup, assuming that the processor has at least four cores, so we have 1 or 2 threads per core.
+We also created a queue structure which stores packet pointers.
+We also created a dynamic array that stores IP addresses in a long format. Array doubles in size when it is full. 
+
+3.1 Starting threads
+Threads are started before the pcap starts capturing packets. At the start, we create a work queue and dynamic array and set FLAGRUN to 1 to indicate that we want to run a thread loop. Finally, we create eight threads.
+
+3.2 Adding packets to the queue
+When a packet arrives, we acquire the lock, add the packet to the work queue, broadcast a signal to the threads, and release the lock.
+
+3.3 Thread loop 
+We run the thread loop until FLAGRUN is set to 0. We first acquire the lock in the loop and wait for the broadcast signal. If we receive the broadcast signal but the work queue is empty, we wait for the signal again. If the queue is not empty, we dequeue the packet and release the lock. Then we analyse the received packet and acquire another lock to update global variables that store the packet report data. After that, we release the lock and free the memory allocated for the packet structure in analyse function.
+
+4. Signal handling
+In order to terminate the program, we need to handle SIGINT signal. After pressing the Cntl+C, the program breaks the pcap loop and closes pcap session to stop receiving packets. Then we run kill_threads method, which sets FLAGRUN to 0 and stops the thread loop. Finally, we process the resulting array of IP addresses and print the report using global variables.
+
